@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1e3a8a">
+<title>Karten-Scanner</title>
+<!--
+  Karten-Scanner – eine einzige Datei, kein eigener Server.
+  - Texterkennung (OCR) läuft direkt auf dem Handy mit Tesseract.js
+  - Kartendaten und Cardmarket-Preise (EUR) kommen kostenlos von TCGdex (api.tcgdex.net)
+-->
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+  :root { --blau:#1e3a8a; --hell:#eef2ff; --grau:#64748b; --rand:#e2e8f0; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background:#f8fafc; color:#0f172a; }
+  header { background:var(--blau); color:#fff; padding:14px 16px; }
+  header h1 { margin:0; font-size:1.25rem; }
+  header p { margin:4px 0 0; font-size:.85rem; opacity:.85; }
+  main { padding:14px; max-width:640px; margin:0 auto; }
+  .karte { background:#fff; border:1px solid var(--rand); border-radius:14px; padding:14px; margin-bottom:14px; }
+  h2 { font-size:1rem; margin:0 0 10px; }
+  .gross { display:block; width:100%; padding:16px; font-size:1.1rem; font-weight:600; border:0;
+           border-radius:12px; background:var(--blau); color:#fff; text-align:center; cursor:pointer; }
+  .zeile { display:flex; gap:8px; margin-top:10px; }
+  input[type=text] { flex:1; padding:12px; font-size:1rem; border:1px solid var(--rand); border-radius:10px; }
+  button.klein { padding:12px 14px; font-size:1rem; border:0; border-radius:10px; background:var(--hell);
+                 color:var(--blau); font-weight:600; cursor:pointer; }
+  .sprache { display:flex; gap:6px; margin-top:10px; }
+  .sprache button { flex:1; padding:8px; border:1px solid var(--rand); background:#fff; border-radius:8px; font-size:.9rem; }
+  .sprache button.aktiv { background:var(--hell); border-color:var(--blau); color:var(--blau); font-weight:600; }
+  #vorschau { width:100%; border-radius:10px; margin-top:10px; display:none; }
+  #status { font-size:.95rem; color:var(--grau); min-height:1.2em; }
+  .hinweis { font-size:.85rem; color:var(--grau); margin:8px 0 0; }
+  .liste { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); gap:10px; }
+  .treffer { border:1px solid var(--rand); border-radius:10px; padding:6px; background:#fff; cursor:pointer; text-align:center; }
+  .treffer img { width:100%; border-radius:6px; aspect-ratio: 245/342; object-fit:cover; background:#f1f5f9; }
+  .treffer .name { font-size:.85rem; font-weight:600; margin-top:4px; }
+  .treffer .set { font-size:.75rem; color:var(--grau); }
+  .detail { display:flex; gap:12px; align-items:flex-start; }
+  .detail img { width:42%; border-radius:8px; }
+  table { width:100%; border-collapse:collapse; font-size:.95rem; }
+  td { padding:6px 4px; border-bottom:1px solid var(--rand); }
+  td.wert { text-align:right; font-weight:600; }
+  .preis-gross { font-size:1.8rem; font-weight:700; color:var(--blau); margin:4px 0; }
+  a { color:var(--blau); }
+  .versteckt { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Karten-Scanner</h1>
+  <p>Foto machen → Kartennummer erkennen → Cardmarket-Preis sehen</p>
+</header>
+
+<main>
+  <!-- 1. Foto -->
+  <section class="karte">
+    <h2>1. Karte fotografieren</h2>
+    <label class="gross" for="foto">📷 Foto aufnehmen</label>
+    <input id="foto" type="file" accept="image/*" capture="environment" class="versteckt">
+    <p class="hinweis">Tipp: Karte flach auf einen dunklen Tisch legen, gutes Licht, Karte füllt das Bild aus.
+       Wichtig ist, dass die Nummer unten (z.&nbsp;B. <b>4/102</b> oder <b>025/198</b>) scharf ist.</p>
+    <div class="sprache" id="sprachwahl">
+      <button data-lang="de" class="aktiv">Deutsche Karte</button>
+      <button data-lang="en">Englische Karte</button>
+    </div>
+    <img id="vorschau" alt="Foto der Karte">
+  </section>
+
+  <!-- 2. Nummer prüfen / manuell -->
+  <section class="karte">
+    <h2>2. Kartennummer</h2>
+    <div id="status">Noch kein Foto.</div>
+    <div class="zeile">
+      <input id="nummer" type="text" inputmode="text" placeholder="z. B. 4/102">
+      <button class="klein" id="nummerSuchen">Suchen</button>
+    </div>
+    <p class="hinweis">Falls die Erkennung danebenliegt, Nummer einfach selbst eintippen.</p>
+    <div class="zeile">
+      <input id="name" type="text" placeholder="…oder Name, z. B. Glurak">
+      <button class="klein" id="nameSuchen">Suchen</button>
+    </div>
+  </section>
+
+  <!-- 3. Treffer -->
+  <section class="karte versteckt" id="trefferBox">
+    <h2>3. Welche Karte ist es?</h2>
+    <div class="liste" id="treffer"></div>
+  </section>
+
+  <!-- 4. Preis -->
+  <section class="karte versteckt" id="preisBox">
+    <h2>Wert</h2>
+    <div id="preis"></div>
+  </section>
+</main>
+
+<script>
+// ---------------------------------------------------------------
+// Grundeinstellungen
+// ---------------------------------------------------------------
+const API = "https://api.tcgdex.net/v2";
+let sprache = "de";            // gewählte Kartensprache
+const setCache = {};           // merkt sich die Set-Listen, damit nicht doppelt geladen wird
+let ocrWorker = null;          // die Texterkennung (wird beim ersten Foto geladen)
+
+const $ = (id) => document.getElementById(id);
+const status = (t) => { $("status").textContent = t; };
+
+// Sprache umschalten
+document.querySelectorAll("#sprachwahl button").forEach((b) => {
+  b.addEventListener("click", () => {
+    document.querySelectorAll("#sprachwahl button").forEach((x) => x.classList.remove("aktiv"));
+    b.classList.add("aktiv");
+    sprache = b.dataset.lang;
+  });
+});
+
+// ---------------------------------------------------------------
+// Hilfsfunktionen für die Datenbank (TCGdex)
+// ---------------------------------------------------------------
+async function holeJson(pfad) {
+  const r = await fetch(API + pfad);
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+
+// Alle Sets (Erweiterungen) einer Sprache laden – mit Zwischenspeicher
+async function alleSets(lang) {
+  if (!setCache[lang]) setCache[lang] = await holeJson(`/${lang}/sets`);
+  return setCache[lang];
+}
+
+// Kartennummer aus einem Text herausfischen, z. B. "4/102", "025/198", "TG05/TG30"
+function findeNummer(text) {
+  const t = text.toUpperCase()
+    .replace(/[|\\]/g, "/")        // OCR verwechselt / oft mit | oder \
+    .replace(/(\d)\s*[Il]\s*(\d)/g, "$1/$2");
+  const muster = /([A-Z]{0,3}\d{1,3})\s*\/\s*([A-Z]{0,3}\d{1,3})/g;
+  let m, beste = null;
+  while ((m = muster.exec(t)) !== null) {
+    const links = m[1], rechts = m[2];
+    const zahlR = parseInt(rechts.replace(/\D/g, ""), 10);
+    if (!zahlR || zahlR < 10) continue;   // "1/2" o. Ä. ist keine Kartennummer
+    beste = { nummer: links, gesamt: rechts };
+  }
+  return beste;
+}
+
+// Nur die Ziffern vergleichen (damit "4", "04" und "004" gleich sind)
+const nurZahl = (s) => parseInt(String(s).replace(/\D/g, ""), 10);
+const prefix = (s) => String(s).replace(/\d/g, "");
+
+// Karten zu einer Nummer wie "4/102" suchen
+async function sucheNachNummer(nummer, gesamt) {
+  const ergebnisse = [];
+  // Wir suchen in der gewählten Sprache, und falls nichts kommt, in der anderen
+  const sprachen = sprache === "de" ? ["de", "en"] : ["en", "de"];
+  for (const lang of sprachen) {
+    if (prefix(nummer)) {
+      // Sondernummern wie TG05/TG30 oder GG35/GG70: direkt nach der Nummer suchen
+      const liste = await holeJson(`/${lang}/cards?localId=eq:${encodeURIComponent(nummer)}`);
+      liste.forEach((k) => ergebnisse.push({ ...k, lang }));
+    } else {
+      const sets = await alleSets(lang);
+      const gesamtZahl = nurZahl(gesamt);
+      // Passende Sets: offizielle Kartenanzahl stimmt (z. B. 102)
+      const kandidaten = sets.filter((s) => s.cardCount && s.cardCount.official === gesamtZahl);
+      // Alle passenden Sets gleichzeitig laden (geht schneller)
+      const details = await Promise.all(kandidaten.slice(0, 15).map((s) =>
+        holeJson(`/${lang}/sets/${s.id}`).catch(() => null)));
+      for (const set of details) {
+        if (!set) continue;
+        for (const k of set.cards || []) {
+          // "4", "04" und "004" zählen als gleich; Sondernummern (mit Buchstaben) überspringen
+          if (!prefix(k.localId) && nurZahl(k.localId) === nurZahl(nummer)) {
+            ergebnisse.push({ ...k, setName: set.name, lang });
+          }
+        }
+      }
+    }
+    if (ergebnisse.length) break;
+  }
+  return ergebnisse;
+}
+
+// Karten nach Namen suchen
+async function sucheNachName(name) {
+  const liste = await holeJson(`/${sprache}/cards?name=${encodeURIComponent(name)}`);
+  return liste.slice(0, 60).map((k) => ({ ...k, lang: sprache }));
+}
+
+// ---------------------------------------------------------------
+// Anzeige
+// ---------------------------------------------------------------
+function bildUrl(k, groesse = "low") {
+  return k.image ? `${k.image}/${groesse}.webp` : "";
+}
+
+function zeigeTreffer(liste) {
+  const box = $("treffer");
+  box.innerHTML = "";
+  $("preisBox").classList.add("versteckt");
+  if (!liste.length) {
+    $("trefferBox").classList.add("versteckt");
+    status("Keine Karte gefunden. Nummer prüfen oder nach Namen suchen.");
+    return;
+  }
+  $("trefferBox").classList.remove("versteckt");
+  for (const k of liste) {
+    const d = document.createElement("div");
+    d.className = "treffer";
+    d.innerHTML = `<img loading="lazy" alt="">
+      <div class="name"></div><div class="set"></div>`;
+    d.querySelector("img").src = bildUrl(k);
+    d.querySelector(".name").textContent = k.name;
+    d.querySelector(".set").textContent = (k.setName ? k.setName + " · " : "") + "#" + k.localId;
+    d.addEventListener("click", () => zeigePreis(k));
+    box.appendChild(d);
+  }
+  if (liste.length === 1) zeigePreis(liste[0]);
+  $("trefferBox").scrollIntoView({ behavior: "smooth" });
+}
+
+const euro = (z) => (typeof z === "number" && z > 0)
+  ? z.toLocaleString("de-DE", { style: "currency", currency: "EUR" }) : "–";
+
+async function zeigePreis(kurz) {
+  const box = $("preis");
+  $("preisBox").classList.remove("versteckt");
+  box.innerHTML = "Lade Preis …";
+  let karte;
+  try {
+    karte = await holeJson(`/${kurz.lang}/cards/${kurz.id}`);
+    // Falls in dieser Sprache kein Preis hinterlegt ist: englische Daten probieren
+    if (!karte.pricing?.cardmarket && kurz.lang !== "en") {
+      try {
+        const en = await holeJson(`/en/cards/${kurz.id}`);
+        if (en.pricing?.cardmarket) karte.pricing = en.pricing;
+      } catch {}
+    }
+  } catch (e) {
+    box.textContent = "Preis konnte nicht geladen werden (" + e.message + ").";
+    return;
+  }
+
+  const cm = karte.pricing?.cardmarket;
+  const holo = cm && (cm["trend-holo"] || cm["avg-holo"]);
+  const suchName = encodeURIComponent(karte.name);
+
+  let html = `<div class="detail">
+      <img src="${bildUrl(karte, "high")}" alt="">
+      <div style="flex:1">
+        <div style="font-weight:700"></div>
+        <div class="set" style="color:#64748b;font-size:.85rem"></div>`;
+  if (cm) {
+    html += `<div class="hinweis">Trendpreis (Cardmarket)</div>
+        <div class="preis-gross">${euro(cm.trend || cm.avg)}</div>`;
+  } else {
+    html += `<p>Für diese Karte ist kein Cardmarket-Preis hinterlegt.</p>`;
+  }
+  html += `</div></div>`;
+
+  if (cm) {
+    html += `<table style="margin-top:10px">
+      <tr><td>Durchschnitt (aktuell)</td><td class="wert">${euro(cm.avg)}</td></tr>
+      <tr><td>Durchschnitt 7 Tage</td><td class="wert">${euro(cm.avg7)}</td></tr>
+      <tr><td>Durchschnitt 30 Tage</td><td class="wert">${euro(cm.avg30)}</td></tr>
+      <tr><td>Günstigstes Angebot</td><td class="wert">${euro(cm.low)}</td></tr>`;
+    if (holo) {
+      html += `<tr><td colspan="2" style="padding-top:12px;font-weight:600">Holo / Reverse-Holo</td></tr>
+      <tr><td>Trendpreis</td><td class="wert">${euro(cm["trend-holo"])}</td></tr>
+      <tr><td>Durchschnitt 30 Tage</td><td class="wert">${euro(cm["avg30-holo"])}</td></tr>
+      <tr><td>Günstigstes Angebot</td><td class="wert">${euro(cm["low-holo"])}</td></tr>`;
+    }
+    html += `</table>`;
+    if (cm.updated) {
+      html += `<p class="hinweis">Preisstand: ${new Date(cm.updated).toLocaleDateString("de-DE")}</p>`;
+    }
+  }
+  html += `<p class="hinweis">Die Preise gelten für Karten in sehr gutem Zustand (Near Mint).
+     Bespielte Karten sind meist deutlich weniger wert.</p>
+     <p><a href="https://www.cardmarket.com/de/Pokemon/Products/Search?searchString=${suchName}"
+        target="_blank" rel="noopener">Auf Cardmarket ansehen →</a></p>`;
+  box.innerHTML = html;
+  box.querySelector(".detail div div").textContent = karte.name;
+  box.querySelector(".set").textContent =
+    (karte.set?.name || "") + " · Nr. " + karte.localId + (karte.set?.cardCount?.official ? "/" + karte.set.cardCount.official : "");
+  $("preisBox").scrollIntoView({ behavior: "smooth" });
+}
+
+// ---------------------------------------------------------------
+// Texterkennung (OCR)
+// ---------------------------------------------------------------
+async function holeOcr() {
+  if (!ocrWorker) {
+    status("Lade Texterkennung (nur beim ersten Mal, ca. 10 Sek.) …");
+    ocrWorker = await Tesseract.createWorker("eng");
+  }
+  return ocrWorker;
+}
+
+// Einen Bildausschnitt vergrößern, in Graustufen umwandeln und Kontrast erhöhen
+function ausschnitt(img, yStart, hoehe) {
+  const faktor = Math.min(3, 2400 / img.naturalWidth);
+  const c = document.createElement("canvas");
+  c.width = Math.round(img.naturalWidth * faktor);
+  c.height = Math.round(img.naturalHeight * hoehe * faktor);
+  const ctx = c.getContext("2d");
+  ctx.filter = "grayscale(1) contrast(1.6)";
+  ctx.drawImage(img, 0, img.naturalHeight * yStart, img.naturalWidth, img.naturalHeight * hoehe,
+                0, 0, c.width, c.height);
+  return c;
+}
+
+async function erkenne(img) {
+  const w = await holeOcr();
+  // Durchgang 1: nur das untere Viertel, nur Zeichen die in Kartennummern vorkommen
+  status("Lese Kartennummer …");
+  await w.setParameters({ tessedit_char_whitelist: "0123456789/ABCDEFGHIJKLMNOPQRSTUVWXYZ" });
+  let { data } = await w.recognize(ausschnitt(img, 0.75, 0.25));
+  let treffer = findeNummer(data.text);
+  if (treffer) return treffer;
+
+  // Durchgang 2: ganzes Bild (falls die Karte nicht das ganze Foto ausfüllt)
+  status("Suche im ganzen Bild …");
+  ({ data } = await w.recognize(ausschnitt(img, 0, 1)));
+  return findeNummer(data.text);
+}
+
+// ---------------------------------------------------------------
+// Ablauf: Foto → Nummer → Suche
+// ---------------------------------------------------------------
+$("foto").addEventListener("change", async (e) => {
+  const datei = e.target.files[0];
+  if (!datei) return;
+  const img = $("vorschau");
+  img.src = URL.createObjectURL(datei);
+  img.style.display = "block";
+  await img.decode();
+  try {
+    const t = await erkenne(img);
+    if (!t) {
+      status("Nummer nicht erkannt. Bitte neues Foto machen oder Nummer eintippen.");
+      return;
+    }
+    $("nummer").value = `${t.nummer}/${t.gesamt}`;
+    status(`Erkannt: ${t.nummer}/${t.gesamt} – suche Karte …`);
+    const liste = await sucheNachNummer(t.nummer, t.gesamt);
+    zeigeTreffer(liste);
+    if (liste.length) status(`Erkannt: ${t.nummer}/${t.gesamt} – ${liste.length} Treffer.`);
+  } catch (err) {
+    status("Fehler: " + err.message + " (Internetverbindung prüfen)");
+  } finally {
+    e.target.value = "";   // damit dasselbe Foto erneut gewählt werden kann
+  }
+});
+
+$("nummerSuchen").addEventListener("click", async () => {
+  const t = findeNummer($("nummer").value);
+  if (!t) { status("Bitte im Format 4/102 eingeben."); return; }
+  status("Suche Karte …");
+  try {
+    const liste = await sucheNachNummer(t.nummer, t.gesamt);
+    zeigeTreffer(liste);
+    if (liste.length) status(`${liste.length} Treffer für ${t.nummer}/${t.gesamt}.`);
+  } catch (err) { status("Fehler: " + err.message); }
+});
+
+$("nameSuchen").addEventListener("click", async () => {
+  const n = $("name").value.trim();
+  if (!n) return;
+  status("Suche nach Name …");
+  try {
+    const liste = await sucheNachName(n);
+    zeigeTreffer(liste);
+    if (liste.length) status(`${liste.length} Treffer für „${n}“.`);
+  } catch (err) { status("Fehler: " + err.message); }
+});
+</script>
+</body>
+</html>
